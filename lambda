@@ -1,0 +1,92 @@
+import json
+import boto3
+from botocore.config import Config
+
+def truncate_text(text, max_length=6000):
+    """Truncate text to a maximum length while keeping whole sentences."""
+    if len(text) <= max_length:
+        return text
+        
+    # Find the last period within the limit
+    last_period = text[:max_length].rfind('.')
+    if last_period == -1:
+        return text[:max_length]
+    return text[:last_period + 1]
+
+def lambda_handler(event, context):
+    try:
+        # Safely get the body from the event
+        if 'body' in event:
+            body = json.loads(event['body'])
+        else:
+            body = event
+            
+        text_content = body.get('text', '')
+        
+        if not text_content:
+            return {
+                'statusCode': 400,
+                'body': json.dumps({
+                    'error': 'No text content provided'
+                })
+            }
+
+        # Truncate text to a reasonable length
+        truncated_text = truncate_text(text_content)
+
+        # Configure boto3 client for Bedrock with timeout settings
+        bedrock = boto3.client(
+            service_name='bedrock-runtime',
+            region_name='us-east-1',
+            config=Config(
+                signature_version='v4',
+                retries={'max_attempts': 3},
+                connect_timeout=5,
+                read_timeout=25  # Increased timeout
+            )
+        )
+        
+        # Format the prompt exactly as required by Claude
+        prompt = f"Human: Please provide a concise summary (maximum 3 paragraphs) of the following text:\n\n{truncated_text}\n\nAssistant: Here's a concise summary:"
+        
+        # Call Bedrock with timeout handling
+        response = bedrock.invoke_model(
+            modelId='anthropic.claude-v2',
+            body=json.dumps({
+                "prompt": prompt,
+                "max_tokens_to_sample": 300,
+                "temperature": 0.5,
+                "anthropic_version": "bedrock-2023-05-31",
+                "top_p": 1,
+                "top_k": 250
+            })
+        )
+        
+        # Parse response
+        response_body = json.loads(response['body'].read())
+        summary = response_body['completion']
+        
+        return {
+            'statusCode': 200,
+            'headers': {
+                'Access-Control-Allow-Origin': '*',
+                'Access-Control-Allow-Headers': 'Content-Type',
+                'Access-Control-Allow-Methods': 'POST'
+            },
+            'body': json.dumps({'summary': summary})
+        }
+        
+    except Exception as e:
+        print(f"Error: {str(e)}")  # Add logging
+        return {
+            'statusCode': 500,
+            'headers': {
+                'Access-Control-Allow-Origin': '*',
+                'Access-Control-Allow-Headers': 'Content-Type',
+                'Access-Control-Allow-Methods': 'POST'
+            },
+            'body': json.dumps({
+                'error': str(e),
+                'message': 'Internal server error'
+            })
+        }
