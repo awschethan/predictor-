@@ -5,6 +5,7 @@
 // @description  Summarize webpages using Amazon Bedrock with sidebar
 // @author       Your Name
 // @match        https://support.microsoft.com/*
+ // @include        http*://*.support.aws.a2z.com/*
 // @grant        GM_xmlhttpRequest
 // ==/UserScript==
 
@@ -12,7 +13,6 @@
     'use strict';
 
     // Variables for resize functionality
-    // @include        http*://*.support.aws.a2z.com/*
     let isResizing = false;
     let lastDownX = 0;
     let sidebarWidth = '300px';
@@ -181,7 +181,7 @@
 
         GM_xmlhttpRequest({
             method: 'POST',
-            url: 'https://6,,.execute-api.us-east-1.amazonaws.com/prod/',
+            url: 'https://6rt8u9i8d9.execute-api.us-east-1.amazonaws.com/prod/',
             headers: {
                 'Content-Type': 'application/json',
                 'Accept': 'application/json'
@@ -206,57 +206,73 @@
                     const body = typeof result.body === 'string' ? JSON.parse(result.body) : result.body;
 
                     if (body && body.summary) {
-                        const summary = body.summary;
-                        // Split the summary into paragraphs
-                        const paragraphs = summary.split('. ').map(p => p.trim()).filter(p => p);
+    const summary = body.summary;
+    const timePrediction = body.time_prediction;
+    const paragraphs = summary.split('. ').map(p => p.trim()).filter(p => p);
 
-                        contentContainer.innerHTML = `
-                            <h3 style="margin-top:0; color: #2c3e50;">Page Summary</h3>
+    contentContainer.innerHTML = `
+        <h3 style="margin-top:0; color: #2c3e50;">Page Summary</h3>
 
-                            <div style="
-                                padding: 15px;
-                                background-color: #f8f9fa;
-                                border-radius: 5px;
-                                border-left: 4px solid #4CAF50;
-                                margin-bottom: 15px;
-                            ">
-                                <div style="
-                                    line-height: 1.6;
-                                    color: #2c3e50;
-                                    padding-right: 30px;
-                                ">
-                                    ${paragraphs.map(p => `<p style="margin: 0.5em 0">${p}.</p>`).join('')}
-                                </div>
-                            </div>
+        <div style="
+            padding: 15px;
+            background-color: #f8f9fa;
+            border-radius: 5px;
+            border-left: 4px solid #4CAF50;
+            margin-bottom: 15px;
+        ">
+            <div style="
+                line-height: 1.6;
+                color: #2c3e50;
+                padding-right: 30px;
+            ">
+                ${paragraphs.map(p => `<p style="margin: 0.5em 0">${p}.</p>`).join('')}
+            </div>
+        </div>
 
-                            <button id="copyButton" style="
-                                padding: 5px 10px;
-                                background: #eee;
-                                border: none;
-                                border-radius: 3px;
-                                cursor: pointer;
-                                margin-right: 10px;
-                            ">Copy All</button>
+        <div style="
+            padding: 15px;
+            background-color: #fff3e0;
+            border-radius: 5px;
+            border-left: 4px solid #ff9800;
+            margin-bottom: 15px;
+        ">
+            <h4 style="margin-top:0; color: #2c3e50;">Estimated Resolution Time</h4>
+            <div style="
+                line-height: 1.6;
+                color: #2c3e50;
+                padding-right: 30px;
+            ">${timePrediction}</div>
+        </div>
 
-                            <button id="newSummaryButton" style="
-                                padding: 5px 10px;
-                                background-color: #4CAF50;
-                                color: white;
-                                border: none;
-                                border-radius: 3px;
-                                cursor: pointer;
-                            ">Generate New Summary</button>
-                        `;
+        <button id="copyButton" style="
+            padding: 5px 10px;
+            background: #eee;
+            border: none;
+            border-radius: 3px;
+            cursor: pointer;
+            margin-right: 10px;
+        ">Copy All</button>
 
-                        document.getElementById('copyButton').onclick = () => {
-                            navigator.clipboard.writeText(summary);
-                            const btn = document.getElementById('copyButton');
-                            btn.textContent = 'Copied!';
-                            setTimeout(() => btn.textContent = 'Copy All', 2000);
-                        };
+        <button id="newSummaryButton" style="
+            padding: 5px 10px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 3px;
+            cursor: pointer;
+        ">Generate New Summary</button>
+    `;
 
-                        document.getElementById('newSummaryButton').onclick = () => summarizeButton.click();
-                    } else if (body && body.error) {
+    // Update copy functionality to include time prediction
+    document.getElementById('copyButton').onclick = () => {
+        const textToCopy = `Summary:\n${summary}\n\nEstimated Resolution Time:\n${timePrediction}`;
+        navigator.clipboard.writeText(textToCopy);
+        const btn = document.getElementById('copyButton');
+        btn.textContent = 'Copied!';
+        setTimeout(() => btn.textContent = 'Copy All', 2000);
+    };
+}
+                    else if (body && body.error) {
                         contentContainer.innerHTML = `
                             <h3 style="color: #e74c3c;">Error</h3>
                             <p>${body.error}</p>
