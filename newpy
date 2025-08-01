@@ -1,0 +1,261 @@
+# with security guardrails and consise
+import json
+import boto3
+import re
+from botocore.config import Config
+
+# Guardrails Configuration
+GUARDRAILS = {
+    "input_validation": {
+        "prompt_template": """
+        <input>
+        {text}
+        </input>
+        <rules>
+        - Do not include any PII data in the response
+        - Focus only on technical details
+        - Provide time estimates in whole days
+        - Keep summaries concise and professional
+        - Avoid speculative content
+        - Include only factual information
+        </rules>
+        """
+    },
+    "output_validation": {
+        "required_format": {
+            "summary": "Must be technical and concise",
+            "time_prediction": {
+                "one_line": "Single sentence technical summary",
+                "days": "Numeric value",
+                "explanation": "Technical justification"
+            }
+        }
+    }
+}
+
+def apply_guardrails(text, guardrail_type):
+    """Apply guardrails to input or output"""
+    if guardrail_type == "input":
+        return GUARDRAILS["input_validation"]["prompt_template"].format(text=text)
+    return text
+
+def validate_output(response):
+    """Validate output against guardrails"""
+    try:
+        # Check if response follows required format
+        if "ONE LINE SUMMARY:" not in response or "ESTIMATED DAYS:" not in response:
+            raise ValueError("Response format does not meet guardrails requirements")
+        
+        # Extract and validate estimated days
+        days_match = re.search(r'ESTIMATED DAYS:\s*(\d+)', response)
+        if not days_match:
+            raise ValueError("Missing or invalid estimated days")
+        
+        days = int(days_match.group(1))
+        if days <= 0 or days > 30:  # Example validation range
+            raise ValueError("Estimated days out of acceptable range")
+        
+        return True
+    except Exception as e:
+        print(f"Output validation failed: {str(e)}")
+        return False
+
+def remove_pii(text):
+    """Remove PII data from text"""
+    # Remove email addresses
+    text = re.sub(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', '[EMAIL REMOVED]', text)
+    
+    # Remove phone numbers (various formats)
+    text = re.sub(r'\b\d{3}[-.]?\d{3}[-.]?\d{4}\b', '[PHONE REMOVED]', text)
+    
+    # Remove names (when preceded by common identifiers)
+    text = re.sub(r'(?i)(?:(?:opened by|engineer|customer|user)\s+)([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)', r'\1[NAME REMOVED]', text)
+    
+    # Remove IP addresses
+    text = re.sub(r'\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b', '[IP REMOVED]', text)
+    
+    return text
+
+def truncate_text(text, max_length=6000):
+    """Truncate text to a maximum length while keeping whole sentences."""
+    if len(text) <= max_length:
+        return text
+        
+    # Find the last period within the limit
+    last_period = text[:max_length].rfind('.')
+    if last_period == -1:
+        return text[:max_length]
+    return text[:last_period + 1]
+
+def get_training_data():
+    """Retrieve training data from S3"""
+    s3_client = boto3.client('s3')
+    try:
+        print("Attempting to read training data from S3...")
+        response = s3_client.get_object(
+            Bucket='case-history-training',
+            Key='history.json'
+        )
+        data = response['Body'].read().decode('utf-8')
+        return json.loads(data)
+    except Exception as e:
+        print(f"Detailed error reading training data: {str(e)}")
+        return None
+
+def test_s3_access():
+    """Test S3 access and file reading"""
+    s3_client = boto3.client('s3')
+    try:
+        print("Testing bucket listing...")
+        buckets = s3_client.list_buckets()
+        print(f"Available buckets: {[b['Name'] for b in buckets['Buckets']]}")
+        
+        print("Testing specific bucket access...")
+        objects = s3_client.list_objects_v2(Bucket='case-history-training')
+        print(f"Objects in bucket: {[obj['Key'] for obj in objects.get('Contents', [])]}")
+        
+        print("Testing file reading...")
+        response = s3_client.get_object(
+            Bucket='case-history-training',
+            Key='history.json'
+        )
+        data = response['Body'].read().decode('utf-8')
+        print(f"File content preview: {data[:100]}...")
+        
+        return "S3 access test successful"
+    except Exception as e:
+        return f"S3 access test failed: {str(e)}"
+
+def lambda_handler(event, context):
+    try:
+        # Test S3 access
+        test_result = test_s3_access()
+        print(f"S3 Test Result: {test_result}")
+
+        # Get training data
+        training_data = get_training_data()
+        if not training_data:
+            raise Exception("Failed to load training data")
+
+        # Process input
+        if 'body' in event:
+            body = json.loads(event['body'])
+        else:
+            body = event
+            
+        text_content = body.get('text', '')
+        if not text_content:
+            raise ValueError("No text content provided")
+
+        # Apply input guardrails
+        text_content = remove_pii(text_content)
+        guarded_text = apply_guardrails(text_content, "input")
+        truncated_text = truncate_text(guarded_text)
+
+        # Configure bedrock client
+        bedrock = boto3.client(
+            service_name='bedrock-runtime',
+            region_name='us-east-1',
+            config=Config(
+                signature_version='v4',
+                retries={'max_attempts': 3},
+                connect_timeout=5,
+                read_timeout=25
+            )
+        )
+        
+        # Get summary with guardrails
+        summary_prompt = f"""Human: Following these strict guidelines:
+        - Focus only on technical aspects
+        - Exclude all personal information
+        - Be concise and clear
+        - Stick to factual information
+        
+        Please summarize:
+        {truncated_text}
+
+        Assistant:"""
+        
+        summary_response = bedrock.invoke_model(
+            modelId='anthropic.claude-v2',
+            body=json.dumps({
+                "prompt": summary_prompt,
+                "max_tokens_to_sample": 300,
+                "temperature": 0.5,
+                "anthropic_version": "bedrock-2023-05-31",
+                "stop_sequences": ["Human:"]
+            })
+        )
+        
+        summary_body = json.loads(summary_response['body'].read())
+        summary = summary_body['completion']
+
+        # Prediction prompt with guardrails
+        prediction_prompt = f"""Human: Following these strict guidelines:
+        - Provide specific, numeric time estimates
+        - Base predictions on historical data
+        - Focus on technical factors
+        - Maintain professional tone
+        - Exclude personal information
+        
+        Historical cases:
+        {json.dumps(training_data['case_history'], indent=2)}
+
+        New case summary:
+        {summary}
+
+        Provide your response in exactly this format:
+        ONE LINE SUMMARY: [technical summary in one sentence]
+        ESTIMATED DAYS: [whole number]
+        EXPLANATION: [technical justification]
+
+        Assistant:"""
+
+        prediction_response = bedrock.invoke_model(
+            modelId='anthropic.claude-v2',
+            body=json.dumps({
+                "prompt": prediction_prompt,
+                "max_tokens_to_sample": 300,
+                "temperature": 0.5,
+                "anthropic_version": "bedrock-2023-05-31",
+                "stop_sequences": ["Human:"]
+            })
+        )
+        
+        prediction_body = json.loads(prediction_response['body'].read())
+        time_prediction = prediction_body['completion']
+
+        # Validate output against guardrails
+        if not validate_output(time_prediction):
+            raise ValueError("Response failed guardrails validation")
+
+        # Format response
+        response_data = {
+            'summary': summary,
+            'time_prediction': time_prediction
+        }
+
+        return {
+            'statusCode': 200,
+            'headers': {
+                'Access-Control-Allow-Origin': '*',
+                'Access-Control-Allow-Headers': 'Content-Type',
+                'Access-Control-Allow-Methods': 'POST'
+            },
+            'body': json.dumps(response_data)
+        }
+        
+    except Exception as e:
+        print(f"Lambda handler error: {str(e)}")
+        return {
+            'statusCode': 500,
+            'headers': {
+                'Access-Control-Allow-Origin': '*',
+                'Access-Control-Allow-Headers': 'Content-Type',
+                'Access-Control-Allow-Methods': 'POST'
+            },
+            'body': json.dumps({
+                'error': str(e),
+                'message': 'Internal server error'
+            })
+        }
