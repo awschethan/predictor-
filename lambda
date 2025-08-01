@@ -13,9 +13,60 @@ def truncate_text(text, max_length=6000):
         return text[:max_length]
     return text[:last_period + 1]
 
+def get_training_data():
+    """Retrieve training data from S3"""
+    s3_client = boto3.client('s3')
+    try:
+        print("Attempting to read training data from S3...")  # Debug log
+        response = s3_client.get_object(
+            Bucket='case-history-training',
+            Key='history.json'
+        )
+        data = response['Body'].read().decode('utf-8')
+        print(f"Successfully read data: {data[:100]}...")  # Debug log
+        return json.loads(data)
+    except Exception as e:
+        print(f"Detailed error reading training data: {str(e)}")  # Detailed error log
+        return None
+
+def test_s3_access():
+    """Test S3 access and file reading"""
+    s3_client = boto3.client('s3')
+    try:
+        # Test bucket listing
+        print("Testing bucket listing...")
+        buckets = s3_client.list_buckets()
+        print(f"Available buckets: {[b['Name'] for b in buckets['Buckets']]}")
+        
+        # Test specific bucket access
+        print("Testing specific bucket access...")
+        objects = s3_client.list_objects_v2(Bucket='case-history-training')
+        print(f"Objects in bucket: {[obj['Key'] for obj in objects.get('Contents', [])]}")
+        
+        # Test file reading
+        print("Testing file reading...")
+        response = s3_client.get_object(
+            Bucket='case-history-training',
+            Key='history.json'
+        )
+        data = response['Body'].read().decode('utf-8')
+        print(f"File content preview: {data[:100]}...")
+        
+        return "S3 access test successful"
+    except Exception as e:
+        return f"S3 access test failed: {str(e)}"
+
 def lambda_handler(event, context):
     try:
-        # Safely get the body from the event
+        # Get training data with explicit error handling
+        training_data = get_training_data()
+        if not training_data:
+            print("Training data is None")  # Debug log
+            raise Exception("Failed to load training data")
+
+        print(f"Successfully loaded training data: {json.dumps(training_data)[:100]}...")  # Debug log
+
+        # Get the text content from the event
         if 'body' in event:
             body = json.loads(event['body'])
         else:
@@ -34,7 +85,7 @@ def lambda_handler(event, context):
         # Truncate text to a reasonable length
         truncated_text = truncate_text(text_content)
 
-        # Configure boto3 client for Bedrock with timeout settings
+        # Configure bedrock client
         bedrock = boto3.client(
             service_name='bedrock-runtime',
             region_name='us-east-1',
@@ -42,30 +93,53 @@ def lambda_handler(event, context):
                 signature_version='v4',
                 retries={'max_attempts': 3},
                 connect_timeout=5,
-                read_timeout=25  # Increased timeout
+                read_timeout=25
             )
         )
         
-        # Format the prompt exactly as required by Claude
-        prompt = f"Human: Please provide a concise summary (maximum 3 paragraphs) of the following text:\n\n{truncated_text}\n\nAssistant: Here's a concise summary:"
-        
-        # Call Bedrock with timeout handling
-        response = bedrock.invoke_model(
+        # Get summary first
+        summary_prompt = f"Human: Please summarize the following text:\n\n{truncated_text}\n\nAssistant:"
+        summary_response = bedrock.invoke_model(
             modelId='anthropic.claude-v2',
             body=json.dumps({
-                "prompt": prompt,
+                "prompt": summary_prompt,
                 "max_tokens_to_sample": 300,
                 "temperature": 0.5,
-                "anthropic_version": "bedrock-2023-05-31",
-                "top_p": 1,
-                "top_k": 250
+                "anthropic_version": "bedrock-2023-05-31"
             })
         )
         
-        # Parse response
-        response_body = json.loads(response['body'].read())
-        summary = response_body['completion']
+        summary_body = json.loads(summary_response['body'].read())
+        summary = summary_body['completion']
+
+        # Create prediction prompt using training data
+        prediction_prompt = f"""Human: Based on the following historical cases, predict how many days it will take to resolve this case.
+
+        Historical cases:
+        {json.dumps(training_data['case_history'], indent=2)}
+
+        New case summary:
+        {summary}
+
+        Please analyze the complexity and predict resolution time in days based on similar historical cases.
+        Provide a specific number of days and explanation for the prediction.
+
+        Assistant:"""
+
+        # Get prediction
+        prediction_response = bedrock.invoke_model(
+            modelId='anthropic.claude-v2',
+            body=json.dumps({
+                "prompt": prediction_prompt,
+                "max_tokens_to_sample": 300,
+                "temperature": 0.5,
+                "anthropic_version": "bedrock-2023-05-31"
+            })
+        )
         
+        prediction_body = json.loads(prediction_response['body'].read())
+        time_prediction = prediction_body['completion']
+
         return {
             'statusCode': 200,
             'headers': {
@@ -73,11 +147,14 @@ def lambda_handler(event, context):
                 'Access-Control-Allow-Headers': 'Content-Type',
                 'Access-Control-Allow-Methods': 'POST'
             },
-            'body': json.dumps({'summary': summary})
+            'body': json.dumps({
+                'summary': summary,
+                'time_prediction': time_prediction
+            })
         }
         
     except Exception as e:
-        print(f"Error: {str(e)}")  # Add logging
+        print(f"Lambda handler error: {str(e)}")  # Detailed error log
         return {
             'statusCode': 500,
             'headers': {
