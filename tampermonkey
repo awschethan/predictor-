@@ -181,7 +181,7 @@
 
         GM_xmlhttpRequest({
             method: 'POST',
-            url: 'https://6rt8u9i8d9.execute-api.us-east-1.amazonaws.com/prod/',
+            url: 'https://lkkkkkkk.execute-api.us-east-1.amazonaws.com/prod/',
             headers: {
                 'Content-Type': 'application/json',
                 'Accept': 'application/json'
