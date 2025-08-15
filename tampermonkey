@@ -5,7 +5,7 @@
 // @description  Summarize webpages using Amazon Bedrock with sidebar
 // @author       Your Name
 // @match        https://support.microsoft.com/*
- // @include        http*://*.support.aws.a2z.com/*
+ // @include        http*://*.b.com/*
 // @grant        GM_xmlhttpRequest
 // ==/UserScript==
 
